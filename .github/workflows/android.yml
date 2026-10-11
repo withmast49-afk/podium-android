@@ -1,0 +1,93 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SWIFT_VERSION: "6.4.0"
+  # From https://swift.org/documentation/articles/swift-sdk-for-android-getting-started.html
+  SWIFT_ANDROID_SDK_URL: https://download.swift.org/swift-6.4.0-release/android-sdk/swift-6.4.0-RELEASE/swift-6.4.0-RELEASE_android.artifactbundle.tar.gz
+  SWIFT_ANDROID_SDK_CHECKSUM: 21fb555122a3d801ad943d48df7ebffdd8824de61c25c180bb792d3edaee0b43
+  SWIFT_ANDROID_SDK: swift-6.4.0-RELEASE_android
+  NDK_URL: https://dl.google.com/android/repository/android-ndk-r30-linux.zip
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the C support code (AES, SHA-1, inflate) against Python
+        run: |
+          pip install cryptography
+          python3 tools/test_c_support.py
+
+      - name: Install Swift
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils git gnupg2 libc6-dev libcurl4-openssl-dev libedit2 libsqlite3-0 libxml2-dev libncurses-dev pkg-config tzdata zlib1g-dev unzip curl
+          curl -fSL -O "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz"
+          tar zxf "swiftly-$(uname -m).tar.gz"
+          ./swiftly init --quiet-shell-followup --assume-yes
+          echo "$HOME/.local/share/swiftly/bin" >> "$GITHUB_PATH"
+          . "$HOME/.local/share/swiftly/env.sh"
+          swiftly install --assume-yes --use "$SWIFT_VERSION"
+          swift --version
+
+      - name: Install the Swift SDK for Android
+        run: swift sdk install "$SWIFT_ANDROID_SDK_URL" --checksum "$SWIFT_ANDROID_SDK_CHECKSUM"
+
+      - name: Install the Android NDK r30
+        run: |
+          curl -fSL -o ndk.zip "$NDK_URL"
+          unzip -qo ndk.zip
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r30" >> "$GITHUB_ENV"
+
+      - name: Build libPodiumNative.so + JNI glue
+        run: tools/build-android.sh
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Build the APK
+        working-directory: android
+        run: gradle --no-daemon :app:assembleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Podium-android-apk
+          path: android/app/build/outputs/apk/release/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-libs
+          path: android/app/src/main/jniLibs/arm64-v8a/*.so
+
+  # The pure-logic unit tests (CPU, memory, boot, devices) on a Linux x86 host. A cheap check
+  # that the portable core still builds off Apple platforms; allowed to fail while the port settles.
+  core-tests:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Swift
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils git gnupg2 libc6-dev libcurl4-openssl-dev libedit2 libsqlite3-0 libxml2-dev libncurses-dev pkg-config tzdata zlib1g-dev curl
+          curl -fSL -O "https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz"
+          tar zxf "swiftly-$(uname -m).tar.gz"
+          ./swiftly init --quiet-shell-followup --assume-yes
+          echo "$HOME/.local/share/swiftly/bin" >> "$GITHUB_PATH"
+          . "$HOME/.local/share/swiftly/env.sh"
+          swiftly install --assume-yes --use "$SWIFT_VERSION"
+      - run: swift test
