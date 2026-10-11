@@ -47,7 +47,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r30" >> "$GITHUB_ENV"
 
       - name: Build libPodiumNative.so + JNI glue
-        run: tools/build-android.sh
+        run: bash tools/build-android.sh
 
       - uses: actions/setup-java@v4
         with:
