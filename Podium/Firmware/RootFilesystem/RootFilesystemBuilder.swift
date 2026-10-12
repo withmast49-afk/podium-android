@@ -191,7 +191,7 @@ final class RootFilesystemBuilder {
     /// Removes the children of a folder whose names match `pattern` (an
     /// `fnmatch` glob), except those in `keeping`.
     func removeChildren(of path: String, matching pattern: String = "*", keeping: Set<String> = []) throws {
-        for child in try children(of: path) where !keeping.contains(child.name) && fnmatch(pattern, child.name, 0) == 0 {
+        for child in try children(of: path) where !keeping.contains(child.name) && podiumFnmatch(pattern, child.name) {
             try remove(index: child.index)
         }
     }

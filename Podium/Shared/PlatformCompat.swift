@@ -42,6 +42,87 @@ func podiumPread(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int, _
     #endif
 }
 
+/// `mmap` that reports failure as nil on every platform. Swift can't import
+/// `MAP_FAILED` (`(void *)-1`) off Apple platforms, and Android's `mmap` isn't
+/// imported as optional, so the callers' `guard let` would not compile.
+func podiumMmap(_ address: UnsafeMutableRawPointer?, _ length: Int, _ protection: Int32,
+                _ flags: Int32, _ fd: Int32, _ offset: Int64) -> UnsafeMutableRawPointer? {
+    let result = mmap(address, length, protection, flags, fd, off_t(offset))
+    if UInt(bitPattern: result) == UInt.max { return nil }   // MAP_FAILED
+    return result
+}
+
+/// `fnmatch(3)` with no flags: `*`, `?`, `[...]` (ranges, `!`/`^` negation) and `\` escapes.
+/// Android's libc module doesn't export `fnmatch`, so off Apple platforms this is done by hand.
+func podiumFnmatch(_ pattern: String, _ name: String) -> Bool {
+    #if canImport(Darwin)
+    return fnmatch(pattern, name, 0) == 0
+    #else
+    return globMatch(Array(pattern.unicodeScalars), Array(name.unicodeScalars))
+    #endif
+}
+
+#if !canImport(Darwin)
+private func globMatch(_ pattern: [Unicode.Scalar], _ text: [Unicode.Scalar]) -> Bool {
+    var p = 0, t = 0
+    var starPattern = -1, starText = 0
+    while t < text.count {
+        var advanced = false
+        if p < pattern.count {
+            switch pattern[p] {
+            case "*":
+                starPattern = p
+                starText = t
+                p += 1
+                continue
+            case "?":
+                p += 1; t += 1; advanced = true
+            case "[":
+                if let bracket = globBracket(pattern, p, text[t]) {
+                    if bracket.matched { p = bracket.next; t += 1; advanced = true }
+                } else if text[t] == "[" {
+                    p += 1; t += 1; advanced = true      // no closing bracket: a literal "["
+                }
+            case "\\":
+                if p + 1 < pattern.count, pattern[p + 1] == text[t] { p += 2; t += 1; advanced = true }
+            default:
+                if pattern[p] == text[t] { p += 1; t += 1; advanced = true }
+            }
+        }
+        if advanced { continue }
+        guard starPattern >= 0 else { return false }
+        starText += 1                                    // let the last "*" swallow one more character
+        t = starText
+        p = starPattern + 1
+    }
+    while p < pattern.count, pattern[p] == "*" { p += 1 }
+    return p == pattern.count
+}
+
+private func globBracket(_ pattern: [Unicode.Scalar], _ start: Int, _ character: Unicode.Scalar) -> (matched: Bool, next: Int)? {
+    var i = start + 1
+    guard i < pattern.count else { return nil }
+    var negate = false
+    if pattern[i] == "!" || pattern[i] == "^" { negate = true; i += 1 }
+    var matched = false
+    var first = true
+    while i < pattern.count {
+        if pattern[i] == "]" && !first { return (matched != negate, i + 1) }
+        first = false
+        var low = pattern[i]
+        if low == "\\", i + 1 < pattern.count { i += 1; low = pattern[i] }
+        if i + 2 < pattern.count, pattern[i + 1] == "-", pattern[i + 2] != "]" {
+            if low <= character && character <= pattern[i + 2] { matched = true }
+            i += 3
+        } else {
+            if low == character { matched = true }
+            i += 1
+        }
+    }
+    return nil
+}
+#endif
+
 /// APFS copy-on-write clone. False means "not cloned, copy the bytes".
 func podiumCloneFile(_ source: String, _ destination: String) -> Bool {
     #if canImport(Darwin)

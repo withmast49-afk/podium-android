@@ -30,7 +30,7 @@ final class FlatPhysicalMemory: MemoryBus {
         precondition(length > 0, "Memory region must have a nonzero length")
         self.baseAddress = baseAddress
         self.length = length
-        guard let mapped = mmap(nil, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0), mapped != MAP_FAILED else {
+        guard let mapped = podiumMmap(nil, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0) else {
             preconditionFailure("couldn't reserve \(length) bytes of guest memory")
         }
         self.pointer = mapped
@@ -70,7 +70,7 @@ final class FlatPhysicalMemory: MemoryBus {
         let offset = Int(address - baseAddress)
         guard size > 0, offset + size <= length else { throw MapFileError.outOfRange(address: address, length: size) }
         let target = pointer + offset
-        guard let mapped = mmap(target, size, PROT_READ | PROT_WRITE, (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED, fd, 0), mapped == target else {
+        guard let mapped = podiumMmap(target, size, PROT_READ | PROT_WRITE, (shared ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED, fd, 0), mapped == target else {
             throw MapFileError.mapFailed(errno: errno)
         }
         if shared {

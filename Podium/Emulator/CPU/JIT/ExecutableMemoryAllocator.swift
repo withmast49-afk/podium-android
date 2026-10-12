@@ -54,7 +54,7 @@ enum ExecutableMemoryError: Error {
 /// model expects, and round-trips correctly end to end.
 enum ExecutableMemoryAllocator {
     static func allocate(byteCount: Int) throws -> UnsafeMutableRawPointer {
-        let pointer = mmap(
+        let pointer = podiumMmap(
             nil,
             roundedUpToPageSize(byteCount),
             PROT_READ | PROT_WRITE,
@@ -62,7 +62,7 @@ enum ExecutableMemoryAllocator {
             -1,
             0
         )
-        guard let pointer, pointer != MAP_FAILED else {
+        guard let pointer else {
             throw ExecutableMemoryError.allocationFailed
         }
         return pointer
