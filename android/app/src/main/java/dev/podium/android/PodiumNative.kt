@@ -31,6 +31,12 @@ object PodiumNative {
     @JvmStatic external fun status(): String
 
     @JvmStatic external fun log(): String
+
+    /** "count|names" (count >= 0) or "-1|reason". [ipaPaths] are newline-separated file paths. */
+    @JvmStatic external fun installIpas(ipsw: String, dataDir: String, ipaPaths: String): String
+
+    /** What the DBT could get from this device: 0 no JIT, 1 RWX memory, 2 dual-mapped memory. */
+    @JvmStatic external fun probeJit(): Int
     @JvmStatic external fun frameWidth(): Int
     @JvmStatic external fun frameHeight(): Int
 

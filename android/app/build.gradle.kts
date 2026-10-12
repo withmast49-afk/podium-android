@@ -40,3 +40,8 @@ android {
     // come straight from the iOS app's resources.
     sourceSets["main"].assets.srcDir("../../Podium/Resources/GuestTools")
 }
+
+dependencies {
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+}

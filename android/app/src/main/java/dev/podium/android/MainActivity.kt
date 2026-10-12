@@ -1,44 +1,58 @@
 package dev.podium.android
 
-import android.app.Activity
-import android.content.Intent
-import android.graphics.Color
-import android.graphics.Typeface
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
-import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
-import android.view.WindowManager
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
-import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
+import com.google.android.material.bottomnavigation.BottomNavigationView
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.button.MaterialButtonToggleGroup
+import com.google.android.material.color.DynamicColors
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.progressindicator.LinearProgressIndicator
+import com.google.android.material.snackbar.Snackbar
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 /**
- * One screen: pick an iPod touch 4 / iOS 6.1.6 (10B500) IPSW, power on, play.
- * Everything heavy happens in the Swift core (libPodiumNative.so); this only
- * shows its status and forwards touches and buttons.
+ * Two tabs. Player: pick an iPod touch 4 / iOS 6.1.6 (10B500) IPSW, power on, play.
+ * Settings: theme, dynamic color, JIT status, IPA install, logs.
+ * Everything heavy happens in the Swift core (libPodiumNative.so).
  */
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
     private val ui = Handler(Looper.getMainLooper())
+    private lateinit var settings: AppSettings
 
+    private lateinit var root: View
+    private lateinit var playerPage: View
+    private lateinit var settingsPage: View
+    private lateinit var navigation: BottomNavigationView
     private lateinit var statusText: TextView
     private lateinit var detailText: TextView
     private lateinit var firmwareText: TextView
-    private lateinit var progress: ProgressBar
-    private lateinit var logText: TextView
-    private lateinit var importButton: Button
-    private lateinit var powerOnButton: Button
-    private lateinit var powerOffButton: Button
+    private lateinit var progress: LinearProgressIndicator
+    private lateinit var importButton: MaterialButton
+    private lateinit var powerOnButton: MaterialButton
+    private lateinit var powerOffButton: MaterialButton
+    private lateinit var jitSwitch: MaterialSwitch
+    private lateinit var jitText: TextView
+    private lateinit var installIpaButton: MaterialButton
+    private lateinit var logPreview: TextView
 
     private val firmwareDir by lazy { File(filesDir, "firmware").apply { mkdirs() } }
     private val ipswFile by lazy { File(firmwareDir, "podium.ipsw") }
@@ -47,23 +61,78 @@ class MainActivity : Activity() {
 
     @Volatile private var toolsReady = false
     @Volatile private var importing = false
+    @Volatile private var installingIpas = false
     @Volatile private var ipswBootable = false
     @Volatile private var alive = true
+    @Volatile private var onSettingsPage = false
     @Volatile private var lastStage = PodiumNative.STAGE_IDLE
+    @Volatile private var lastStatus: PodiumStatus? = null
+    @Volatile private var jitProbe = -1          // -1 not probed yet; else 0, 1 or 2
+    private var firmwareSummary = ""
 
     private val toolNames = listOf("keybag_bootstrap.bin", "podium_syncd.bin", "first_boot_state.plist", "boot_read_files.txt")
 
+    private val pickIpsw = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) importIpsw(uri)
+    }
+    private val pickIpas = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) installIpas(uris)
+    }
+    private val saveLog = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        if (uri != null) writeLog(uri)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        settings = AppSettings(this)
+        AppCompatDelegate.setDefaultNightMode(settings.themeMode)
+        if (settings.dynamicColor && DynamicColors.isDynamicColorAvailable()) DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        setContentView(buildUi())
+        setContentView(R.layout.activity_main)
+
+        root = findViewById(R.id.root)
+        playerPage = findViewById(R.id.playerPage)
+        settingsPage = findViewById(R.id.settingsPage)
+        navigation = findViewById(R.id.navigation)
+        statusText = findViewById(R.id.statusText)
+        detailText = findViewById(R.id.detailText)
+        firmwareText = findViewById(R.id.firmwareText)
+        progress = findViewById(R.id.progress)
+        importButton = findViewById(R.id.importButton)
+        powerOnButton = findViewById(R.id.powerOnButton)
+        powerOffButton = findViewById(R.id.powerOffButton)
+        jitSwitch = findViewById(R.id.jitSwitch)
+        jitText = findViewById(R.id.jitText)
+        installIpaButton = findViewById(R.id.installIpaButton)
+        logPreview = findViewById(R.id.logPreview)
+        progress.max = 1000
+
+        importButton.setOnClickListener { pickIpsw.launch(arrayOf("*/*")) }
+        powerOnButton.setOnClickListener { powerOn() }
+        powerOffButton.setOnClickListener { powerOff() }
+        installIpaButton.setOnClickListener { pickIpas.launch(arrayOf("*/*")) }
+        findViewById<View>(R.id.btnSleep).holdsButton(1)
+        findViewById<View>(R.id.btnVolDown).holdsButton(3)
+        findViewById<View>(R.id.btnHome).holdsButton(0)
+        findViewById<View>(R.id.btnVolUp).holdsButton(2)
+
+        setUpNavigation(savedInstanceState?.getInt(STATE_PAGE) ?: 0)
+        setUpAppearance()
+        setUpLogButtons()
+        findViewById<TextView>(R.id.aboutText).text =
+            "Podium for Android ${appVersion()} · runs iPod touch 4, iOS 6.1.6 (10B500)"
 
         Thread {
+            jitProbe = PodiumNative.probeJit()
             prepareGuestTools()
             if (ipswFile.exists()) inspectFirmware()
-            ui.post { refreshButtons() }
+            ui.post { refresh() }
         }.start()
         startPolling()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt(STATE_PAGE, if (onSettingsPage) 1 else 0)
     }
 
     override fun onDestroy() {
@@ -71,63 +140,144 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    // MARK: UI
+    // MARK: Navigation + appearance
 
-    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
-
-    private fun buildUi(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(18, 18, 20))
-            setPadding(dp(10), dp(28), dp(10), dp(10))
+    private fun setUpNavigation(initialPage: Int) {
+        navigation.setOnItemSelectedListener { item ->
+            showPage(item.itemId == R.id.nav_settings)
+            true
         }
-
-        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        importButton = Button(this).apply { text = "IPSW…"; setOnClickListener { pickIpsw() } }
-        powerOnButton = Button(this).apply { text = "Power on"; setOnClickListener { powerOn() } }
-        powerOffButton = Button(this).apply { text = "Power off"; setOnClickListener { powerOff() } }
-        for (button in listOf(importButton, powerOnButton, powerOffButton)) {
-            top.addView(button, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        }
-        root.addView(top)
-
-        firmwareText = label(12f, Color.LTGRAY).apply { text = "No firmware yet. Pick an iPod touch 4 IPSW for iOS 6.1.6 (10B500)." }
-        statusText = label(16f, Color.WHITE).apply { typeface = Typeface.DEFAULT_BOLD; text = "Preparing app files…" }
-        detailText = label(12f, Color.LTGRAY)
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000; visibility = View.GONE }
-        root.addView(firmwareText)
-        root.addView(statusText)
-        root.addView(progress, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(detailText)
-
-        val screen = ScreenView(this)
-        val screenParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, 0, 1f).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(6)
-            bottomMargin = dp(6)
-        }
-        root.addView(screen, screenParams)
-
-        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        buttons.addView(holdButton("Sleep", 1), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        buttons.addView(holdButton("Vol −", 3), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        buttons.addView(holdButton("Home", 0), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        buttons.addView(holdButton("Vol +", 2), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(buttons)
-
-        logText = label(10f, Color.GRAY).apply { typeface = Typeface.MONOSPACE; maxLines = 5 }
-        root.addView(logText)
-        return root
+        navigation.selectedItemId = if (initialPage == 1) R.id.nav_settings else R.id.nav_player
+        showPage(initialPage == 1)
     }
 
-    private fun label(size: Float, color: Int) = TextView(this).apply {
-        textSize = size
-        setTextColor(color)
+    private fun showPage(settingsVisible: Boolean) {
+        onSettingsPage = settingsVisible
+        playerPage.visibility = if (settingsVisible) View.GONE else View.VISIBLE
+        settingsPage.visibility = if (settingsVisible) View.VISIBLE else View.GONE
+    }
+
+    private fun setUpAppearance() {
+        val toggle = findViewById<MaterialButtonToggleGroup>(R.id.themeToggle)
+        toggle.check(
+            when (settings.themeMode) {
+                AppCompatDelegate.MODE_NIGHT_NO -> R.id.themeLight
+                AppCompatDelegate.MODE_NIGHT_YES -> R.id.themeDark
+                else -> R.id.themeSystem
+            },
+        )
+        toggle.addOnButtonCheckedListener { _, checkedId, isChecked ->
+            if (!isChecked) return@addOnButtonCheckedListener
+            val mode = when (checkedId) {
+                R.id.themeLight -> AppCompatDelegate.MODE_NIGHT_NO
+                R.id.themeDark -> AppCompatDelegate.MODE_NIGHT_YES
+                else -> AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM
+            }
+            if (mode != settings.themeMode) {
+                settings.themeMode = mode
+                AppCompatDelegate.setDefaultNightMode(mode)   // recreates the activity if the look changes
+            }
+        }
+
+        val dynamicSwitch = findViewById<MaterialSwitch>(R.id.dynamicSwitch)
+        val available = DynamicColors.isDynamicColorAvailable()
+        dynamicSwitch.isEnabled = available
+        dynamicSwitch.isChecked = available && settings.dynamicColor
+        if (!available) findViewById<TextView>(R.id.dynamicSupport).text = "Needs Android 12 or newer"
+        dynamicSwitch.setOnCheckedChangeListener { _, checked ->
+            if (checked != settings.dynamicColor) {
+                settings.dynamicColor = checked
+                recreate()
+            }
+        }
+    }
+
+    // MARK: Status polling
+
+    private fun startPolling() {
+        Thread {
+            while (alive) {
+                val status = PodiumStatus.parse(PodiumNative.status())
+                val logLines = if (onSettingsPage) PodiumNative.log().lines().filter { it.isNotBlank() }.takeLast(6) else null
+                ui.post { render(status, logLines) }
+                try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
+            }
+        }.also { it.isDaemon = true }.start()
+    }
+
+    private fun render(status: PodiumStatus, logLines: List<String>?) {
+        lastStage = status.stage
+        lastStatus = status
+        if (!importing && !installingIpas && toolsReady) {
+            statusText.text = when (status.stage) {
+                PodiumNative.STAGE_IDLE -> if (ipswBootable) "Ready" else "Pick an IPSW to begin"
+                PodiumNative.STAGE_STOPPED, PodiumNative.STAGE_ERROR -> status.message
+                else -> status.message.ifEmpty { "Working…" }
+            }
+        }
+        val busy = status.stage == PodiumNative.STAGE_PREPARING || status.stage == PodiumNative.STAGE_BOOTING
+        if (!importing) {
+            progress.visibility = if (busy) View.VISIBLE else View.GONE
+            progress.progress = (status.fraction * 1000).toInt()
+        }
+        detailText.text = when (status.stage) {
+            PodiumNative.STAGE_BOOTING, PodiumNative.STAGE_RUNNING -> String.format(
+                Locale.US, "%s%.0f M instr/s",
+                if (status.secondsRemaining > 0) "About ${status.secondsRemaining.toInt()} s to the lock screen · " else "",
+                status.instructionsPerSecond / 1e6,
+            )
+            PodiumNative.STAGE_PREPARING -> "First launch only; this takes a few minutes."
+            else -> ""
+        }
+        renderJit(status)
+        if (logLines != null) logPreview.text = if (logLines.isEmpty()) "No log yet." else logLines.joinToString("\n")
+        refresh()
+    }
+
+    /** Shows whether the DBT has executable memory. Read-only: the app turns the JIT on by itself when it can. */
+    private fun renderJit(status: PodiumStatus) {
+        val running = status.stage == PodiumNative.STAGE_BOOTING || status.stage == PodiumNative.STAGE_RUNNING
+        val active = if (running) status.jit else jitProbe > 0
+        jitSwitch.isChecked = active
+        jitText.text = when {
+            !running && jitProbe < 0 -> "Checking…"
+            active && running -> "Active · ARM code is translated to native"
+            active -> "Available · turns on automatically when iOS starts"
+            running -> "Inactive · running on the slow interpreter"
+            else -> "Not available on this device · the interpreter will be used"
+        }
+    }
+
+    private fun refresh() {
+        val idle = lastStage == PodiumNative.STAGE_IDLE || lastStage == PodiumNative.STAGE_STOPPED || lastStage == PodiumNative.STAGE_ERROR
+        importButton.isEnabled = idle && !importing && !installingIpas
+        powerOnButton.isEnabled = idle && !importing && !installingIpas && toolsReady && ipswBootable
+        powerOffButton.isEnabled = lastStage >= PodiumNative.STAGE_LOADING_KERNEL && lastStage != PodiumNative.STAGE_STOPPED
+        installIpaButton.isEnabled = idle && !importing && !installingIpas && ipswBootable
+    }
+
+    // MARK: Player actions
+
+    private fun powerOn() {
+        val result = PodiumNative.start(ipswFile.absolutePath, supportDir.absolutePath, toolsDir.absolutePath)
+        if (result != 0) snack("Couldn't start (code $result).")
+    }
+
+    private fun powerOff() {
+        powerOffButton.isEnabled = false
+        Thread {
+            val result = PodiumNative.powerOff()
+            ui.post {
+                when (result) {
+                    -1 -> snack("Still preparing iOS; that can't be cancelled yet.")
+                    -2 -> snack("Couldn't save the disk. Try Power off again.")
+                }
+            }
+        }.start()
     }
 
     /** A hardware button that stays down for as long as the finger does (Sleep and Home are held in iOS). */
-    private fun holdButton(title: String, which: Int) = Button(this).apply {
-        text = title
+    private fun View.holdsButton(which: Int) {
         setOnTouchListener { v, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> { v.isPressed = true; PodiumNative.button(which, true) }
@@ -137,94 +287,15 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun refreshButtons() {
-        val idle = lastStage == PodiumNative.STAGE_IDLE || lastStage == PodiumNative.STAGE_STOPPED || lastStage == PodiumNative.STAGE_ERROR
-        importButton.isEnabled = idle && !importing
-        powerOnButton.isEnabled = idle && !importing && toolsReady && ipswBootable
-        powerOffButton.isEnabled = lastStage >= PodiumNative.STAGE_LOADING_KERNEL && lastStage != PodiumNative.STAGE_STOPPED
+    private fun snack(text: String) {
+        Snackbar.make(root, text, Snackbar.LENGTH_LONG).setAnchorView(navigation).show()
     }
-
-    // MARK: Status polling
-
-    private fun startPolling() {
-        Thread {
-            while (alive) {
-                val status = PodiumStatus.parse(PodiumNative.status())
-                val log = PodiumNative.log().lines().takeLast(5).joinToString("\n")
-                ui.post { render(status, log) }
-                try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
-            }
-        }.also { it.isDaemon = true }.start()
-    }
-
-    private fun render(status: PodiumStatus, log: String) {
-        lastStage = status.stage
-        if (!importing && toolsReady) {
-            statusText.text = when (status.stage) {
-                PodiumNative.STAGE_IDLE -> if (ipswBootable) "Ready" else "Pick an IPSW to begin"
-                PodiumNative.STAGE_STOPPED, PodiumNative.STAGE_ERROR -> status.message
-                else -> status.message.ifEmpty { "Working…" }
-            }
-        }
-        val busy = status.stage == PodiumNative.STAGE_PREPARING || status.stage == PodiumNative.STAGE_BOOTING
-        progress.visibility = if (busy) View.VISIBLE else View.GONE
-        progress.progress = (status.fraction * 1000).toInt()
-        detailText.text = when (status.stage) {
-            PodiumNative.STAGE_BOOTING, PodiumNative.STAGE_RUNNING -> String.format(
-                Locale.US, "%s%.0f M instr/s · JIT %s",
-                if (status.secondsRemaining > 0) "~${status.secondsRemaining.toInt()} s to the lock screen · " else "",
-                status.instructionsPerSecond / 1e6, if (status.jit) "on" else "off (interpreter)",
-            )
-            PodiumNative.STAGE_PREPARING -> "First launch only; this takes a few minutes."
-            else -> ""
-        }
-        logText.text = log
-        refreshButtons()
-    }
-
-    // MARK: Actions
-
-    private fun powerOn() {
-        val result = PodiumNative.start(ipswFile.absolutePath, supportDir.absolutePath, toolsDir.absolutePath)
-        if (result != 0) toast("Couldn't start (code $result).")
-    }
-
-    private fun powerOff() {
-        powerOffButton.isEnabled = false
-        Thread {
-            val result = PodiumNative.powerOff()
-            ui.post {
-                when (result) {
-                    -1 -> toast("Still preparing iOS; that can't be cancelled yet.")
-                    -2 -> toast("Couldn't save the disk. Try Power off again.")
-                }
-            }
-        }.start()
-    }
-
-    private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
 
     // MARK: Firmware import
 
-    private fun pickIpsw() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-        }
-        @Suppress("DEPRECATION")
-        startActivityForResult(intent, REQUEST_IPSW)
-    }
-
-    @Deprecated("Plain Activity; no ActivityResult API without AndroidX")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        val uri = data?.data
-        if (requestCode == REQUEST_IPSW && resultCode == RESULT_OK && uri != null) importIpsw(uri)
-    }
-
     private fun importIpsw(uri: Uri) {
         importing = true
-        refreshButtons()
+        refresh()
         Thread {
             try {
                 var total = -1L
@@ -232,7 +303,7 @@ class MainActivity : Activity() {
                     if (cursor.moveToFirst()) total = cursor.getLong(0)
                 }
                 // The IPSW, a decrypted copy of its root filesystem, and the guest disks all live in app storage.
-                if (filesDir.usableSpace < 5L shl 30) ui.post { toast("Podium needs roughly 5 GB free; low storage may make the first launch fail.") }
+                if (filesDir.usableSpace < 5L shl 30) ui.post { snack("Podium needs roughly 5 GB free; low storage may make the first launch fail.") }
 
                 val temporary = File(firmwareDir, "incoming.ipsw")
                 var copied = 0L
@@ -262,10 +333,10 @@ class MainActivity : Activity() {
                 if (!temporary.renameTo(ipswFile)) throw IllegalStateException("couldn't move the copied IPSW into place")
                 inspectFirmware()
             } catch (error: Exception) {
-                ui.post { toast("Import failed: ${error.message}") }
+                ui.post { snack("Import failed: ${error.message}") }
             } finally {
                 importing = false
-                ui.post { progress.visibility = View.GONE; refreshButtons() }
+                ui.post { progress.visibility = View.GONE; refresh() }
             }
         }.start()
     }
@@ -275,12 +346,111 @@ class MainActivity : Activity() {
         val parts = PodiumNative.inspect(ipswFile.absolutePath).split("|")
         val code = parts.getOrNull(0)?.toIntOrNull() ?: -1
         ipswBootable = code == 1
-        val text = when (code) {
+        firmwareSummary = when (code) {
             -1 -> "That file isn't a readable IPSW."
             else -> "${parts.getOrNull(1)} · iOS ${parts.getOrNull(2)} (${parts.getOrNull(3)}) · ${parts.getOrNull(4)}"
         }
-        ui.post { firmwareText.text = text }
+        ui.post { firmwareText.text = firmwareSummary }
     }
+
+    // MARK: IPA install
+
+    private fun installIpas(uris: List<Uri>) {
+        installingIpas = true
+        statusText.text = "Installing apps…"
+        refresh()
+        Thread {
+            val staging = File(cacheDir, "ipa-import")
+            var title = "IPA install"
+            var message = ""
+            try {
+                staging.deleteRecursively()
+                staging.mkdirs()
+                val paths = uris.mapIndexed { index, uri ->
+                    val folder = File(staging, index.toString()).apply { mkdirs() }
+                    val target = File(folder, displayName(uri) ?: "app$index.ipa")
+                    contentResolver.openInputStream(uri)!!.use { input -> FileOutputStream(target).use { input.copyTo(it) } }
+                    target.absolutePath
+                }
+                val result = PodiumNative.installIpas(ipswFile.absolutePath, supportDir.absolutePath, paths.joinToString("\n"))
+                val parts = result.split("|", limit = 2)
+                val count = parts.getOrNull(0)?.toIntOrNull() ?: -1
+                val text = parts.getOrNull(1).orEmpty()
+                if (count >= 0) {
+                    title = "Installed $count app${if (count == 1) "" else "s"}"
+                    message = "$text\n\nCopied into /Applications. Start iOS to use it; apps that aren't signed or registered may not appear on the home screen."
+                } else {
+                    title = "Couldn't install"
+                    message = text
+                }
+            } catch (error: Exception) {
+                title = "Couldn't install"
+                message = error.message ?: error.toString()
+            } finally {
+                staging.deleteRecursively()
+                installingIpas = false
+            }
+            ui.post {
+                refresh()
+                MaterialAlertDialogBuilder(this).setTitle(title).setMessage(message).setPositiveButton("OK", null).show()
+            }
+        }.start()
+    }
+
+    private fun displayName(uri: Uri): String? =
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+
+    // MARK: Logs
+
+    private fun setUpLogButtons() {
+        findViewById<View>(R.id.copyLogButton).setOnClickListener {
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Podium log", buildLogReport()))
+            snack("Log copied")
+        }
+        findViewById<View>(R.id.saveLogButton).setOnClickListener {
+            val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+            saveLog.launch("podium-log-$stamp.txt")
+        }
+    }
+
+    private fun writeLog(uri: Uri) {
+        try {
+            contentResolver.openOutputStream(uri)!!.use { it.write(buildLogReport().toByteArray()) }
+            snack("Log saved")
+        } catch (error: Exception) {
+            snack("Couldn't save the log: ${error.message}")
+        }
+    }
+
+    /** A header with what's needed to debug (device, JIT, state), then the core's log. */
+    private fun buildLogReport(): String {
+        val status = lastStatus
+        val jit = when {
+            status != null && (status.stage == PodiumNative.STAGE_BOOTING || status.stage == PodiumNative.STAGE_RUNNING) ->
+                if (status.jit) "active" else "inactive"
+            jitProbe > 0 -> "available"
+            jitProbe == 0 -> "not available"
+            else -> "unknown"
+        }
+        return buildString {
+            appendLine("Podium for Android ${appVersion()}")
+            appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown ABI"}")
+            appendLine("Firmware: ${firmwareSummary.ifEmpty { "none" }}")
+            appendLine("State: ${status?.message?.ifEmpty { "-" } ?: "-"} (stage ${status?.stage ?: -1})")
+            appendLine("JIT: $jit")
+            if (status != null) appendLine("Speed: ${status.instructionsPerSecond / 1_000_000} M instr/s")
+            appendLine()
+            appendLine("--- core log ---")
+            append(PodiumNative.log())
+        }
+    }
+
+    private fun appVersion(): String =
+        try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
 
     // MARK: Guest tools
 
@@ -298,11 +468,11 @@ class MainActivity : Activity() {
             }
             toolsReady = true
         } catch (error: Exception) {
-            ui.post { toast("Couldn't unpack app files: ${error.message}") }
+            ui.post { snack("Couldn't unpack app files: ${error.message}") }
         }
     }
 
     private companion object {
-        const val REQUEST_IPSW = 1
+        const val STATE_PAGE = "page"
     }
 }

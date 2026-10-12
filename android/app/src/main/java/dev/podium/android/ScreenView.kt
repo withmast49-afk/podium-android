@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.os.SystemClock
+import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -14,7 +15,8 @@ import android.view.SurfaceView
  * The virtual iPod touch's 640x960 screen: draws the core's frames at ~30 fps and
  * turns finger touches into the device's own pixel coordinates.
  */
-class ScreenView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
+class ScreenView @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null) :
+    SurfaceView(context, attrs), SurfaceHolder.Callback {
     private var renderer: Renderer? = null
 
     init {

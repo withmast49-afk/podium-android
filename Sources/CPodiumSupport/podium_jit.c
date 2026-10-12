@@ -80,4 +80,15 @@ void *podium_jit_allocate(size_t size, void **writable, PodiumJITMode *mode) {
     return NULL;
 }
 
+int podium_jit_probe(void) {
+    const size_t size = 16384;
+    void *writable = NULL;
+    PodiumJITMode mode = PodiumJITModeNone;
+    void *executable = podium_jit_allocate(size, &writable, &mode);
+    if (!executable) return 0;
+    munmap(executable, size);
+    if (writable && writable != executable) munmap(writable, size);
+    return (int)mode;
+}
+
 #endif /* !__APPLE__ */

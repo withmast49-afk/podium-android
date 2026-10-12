@@ -1,5 +1,6 @@
 #if !canImport(Darwin)
 import Foundation
+import CPodiumSupport
 
 // The C entry points the Android app's JNI glue calls (android/app/src/main/cpp/jni_bridge.c).
 // This file replaces what EmulatorCore + the SwiftUI screens do on iOS: power the
@@ -23,7 +24,7 @@ final class AndroidHost: @unchecked Sendable {
 
     /// Guest instructions from power-on to the lock screen, as measured on a Mac by upstream Podium.
     private static let expectedBootInstructions: Double = 5_500_000_000
-    private static let logCapacity = 200
+    private static let logCapacity = 2000
 
     private let lock = NSLock()
     private var stage: Stage = .idle
@@ -90,6 +91,27 @@ final class AndroidHost: @unchecked Sendable {
         let device = metadata.primaryDevice?.shortName ?? metadata.primaryDeviceIdentifier ?? "Unknown device"
         let summary = "\(device)|\(metadata.productVersion)|\(metadata.buildVersion)|\(parsed.compatibility.summary)"
         return (summary, parsed.compatibility.isCompatible)
+    }
+
+    // MARK: IPA install
+
+    /// Copies .ipa app bundles into /Applications on the guest disk. The iPod must be off.
+    /// Returns the number of apps installed (>= 0) or -1 with an explanation.
+    func installIPAs(ipsw: URL, dataDir: URL, ipas: [URL]) -> (code: Int32, message: String) {
+        lock.lock()
+        let busy = session != nil || bootInFlight
+        lock.unlock()
+        do {
+            let storage = PersistentGuestStorage(appSupportURL: dataDir)
+            let apps = try storage.installIPAs(ipas, forFirmwareAt: ipsw, emulatorIsBusy: busy)
+            let names = apps.map { $0.name }.joined(separator: ", ")
+            append("Installed \(apps.count) IPA app(s): \(names)")
+            return (Int32(apps.count), names)
+        } catch {
+            let text = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            append("IPA install failed: \(text)")
+            return (-1, text)
+        }
     }
 
     // MARK: Power on
@@ -389,6 +411,25 @@ public func podium_status(_ out: UnsafeMutablePointer<CChar>?, _ capacity: Int32
 public func podium_log_tail(_ out: UnsafeMutablePointer<CChar>?, _ capacity: Int32) -> Int32 {
     writeCString(AndroidHost.shared.logTail(), to: out, capacity: capacity)
 }
+
+/// Installs IPAs (paths separated by newlines). Returns the app count (>= 0), or -1 with the reason in `out`.
+/// On success `out` holds the installed app names.
+@_cdecl("podium_install_ipas")
+public func podium_install_ipas(_ ipsw: UnsafePointer<CChar>?, _ dataDir: UnsafePointer<CChar>?, _ ipaPaths: UnsafePointer<CChar>?,
+                                _ out: UnsafeMutablePointer<CChar>?, _ capacity: Int32) -> Int32 {
+    guard let ipswURL = url(ipsw), let dataURL = url(dataDir), let ipaPaths else {
+        _ = writeCString("Missing arguments.", to: out, capacity: capacity)
+        return -1
+    }
+    let ipas = String(cString: ipaPaths).split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
+    let result = AndroidHost.shared.installIPAs(ipsw: ipswURL, dataDir: dataURL, ipas: ipas)
+    _ = writeCString(result.message, to: out, capacity: capacity)
+    return result.code
+}
+
+/// Whether this device lets the DBT have executable memory: 0 no, 1 RWX mapping, 2 dual mapping.
+@_cdecl("podium_probe_jit")
+public func podium_probe_jit() -> Int32 { podium_jit_probe() }
 
 @_cdecl("podium_frame_width")
 public func podium_frame_width() -> Int32 { Int32(GuestMemoryLayout.framebufferWidth) }

@@ -26,6 +26,10 @@ void *podium_jit_allocate(size_t size, void **writable, PodiumJITMode *mode);
 /// Makes the instruction cache coherent for [start, start + length).
 void podium_clear_cache(void *start, size_t length);
 
+/// Tries to get executable memory the way the DBT will and gives it back.
+/// Returns a PodiumJITMode value (0 = no JIT on this device).
+int podium_jit_probe(void);
+
 /* ---- AES (128/192/256), ECB or CBC, no padding ---- */
 
 /// `length` must be a multiple of 16. `iv` (16 bytes) is only read for CBC.

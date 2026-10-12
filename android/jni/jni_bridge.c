@@ -15,6 +15,8 @@ extern int podium_start(const char *ipsw, const char *dataDir, const char *asset
 extern int podium_power_off(void);
 extern int podium_status(char *out, int capacity);
 extern int podium_log_tail(char *out, int capacity);
+extern int podium_install_ipas(const char *ipsw, const char *dataDir, const char *ipaPaths, char *out, int capacity);
+extern int podium_probe_jit(void);
 extern int podium_frame_width(void);
 extern int podium_frame_height(void);
 extern int podium_copy_frame(void *buffer, int capacity);
@@ -70,10 +72,36 @@ JNIEXPORT jstring JNICALL JNI(status)(JNIEnv *env, jclass cls) {
 
 JNIEXPORT jstring JNICALL JNI(log)(JNIEnv *env, jclass cls) {
     (void)cls;
-    char text[16384];
+    const int capacity = 512 * 1024;
+    char *text = (char *)malloc((size_t)capacity);
+    if (!text) return (*env)->NewStringUTF(env, "");
     text[0] = 0;
-    podium_log_tail(text, (int)sizeof(text));
-    return (*env)->NewStringUTF(env, text);
+    podium_log_tail(text, capacity);
+    jstring result = (*env)->NewStringUTF(env, text);
+    free(text);
+    return result;
+}
+
+// "count|names" on success (count >= 0), "-1|reason" on failure.
+JNIEXPORT jstring JNICALL JNI(installIpas)(JNIEnv *env, jclass cls, jstring ipsw, jstring dataDir, jstring ipaPaths) {
+    (void)cls;
+    const char *a = (*env)->GetStringUTFChars(env, ipsw, NULL);
+    const char *b = (*env)->GetStringUTFChars(env, dataDir, NULL);
+    const char *c = (*env)->GetStringUTFChars(env, ipaPaths, NULL);
+    char message[2048];
+    message[0] = 0;
+    int code = podium_install_ipas(a, b, c, message, (int)sizeof(message));
+    (*env)->ReleaseStringUTFChars(env, ipsw, a);
+    (*env)->ReleaseStringUTFChars(env, dataDir, b);
+    (*env)->ReleaseStringUTFChars(env, ipaPaths, c);
+    char line[2100];
+    snprintf(line, sizeof(line), "%d|%s", code, message);
+    return (*env)->NewStringUTF(env, line);
+}
+
+JNIEXPORT jint JNICALL JNI(probeJit)(JNIEnv *env, jclass cls) {
+    (void)env; (void)cls;
+    return podium_probe_jit();
 }
 
 JNIEXPORT jint JNICALL JNI(frameWidth)(JNIEnv *env, jclass cls) {
