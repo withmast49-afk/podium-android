@@ -222,13 +222,41 @@ final class RootFilesystemBuilder {
     func editPropertyList(_ path: String, _ edit: (NSMutableDictionary) -> Void) throws {
         var format = PropertyListSerialization.PropertyListFormat.binary
         let original = try contents(of: path)
-        guard let plist = try PropertyListSerialization.propertyList(from: Data(original), options: .mutableContainersAndLeaves, format: &format) as? NSMutableDictionary else {
+        let object = try PropertyListSerialization.propertyList(from: Data(original), options: .mutableContainersAndLeaves, format: &format)
+        guard let plist = Self.mutableDictionary(from: object) else {
             throw HFSPlusError.corrupt("\(path) isn't a dictionary property list")
         }
         edit(plist)
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: format, options: 0)
         try replaceContents(of: path, with: [UInt8](data))
     }
+
+    /// Apple's `PropertyListSerialization` hands back `NSMutableDictionary` / `NSMutableArray`
+    /// trees; swift-corelibs-foundation (Android, Linux) returns plain Swift `[String: Any]` / `[Any]`.
+    /// The edit closures rely on the NSMutable* types, so rebuild the tree with them off Apple platforms.
+    private static func mutableDictionary(from object: Any) -> NSMutableDictionary? {
+        #if canImport(Darwin)
+        return object as? NSMutableDictionary
+        #else
+        return deepMutable(object) as? NSMutableDictionary
+        #endif
+    }
+
+    #if !canImport(Darwin)
+    private static func deepMutable(_ value: Any) -> Any {
+        if let dictionary = value as? [String: Any] {
+            let result = NSMutableDictionary()
+            for (key, inner) in dictionary { result[key] = deepMutable(inner) }
+            return result
+        }
+        if let array = value as? [Any] {
+            let result = NSMutableArray()
+            for inner in array { result.add(deepMutable(inner)) }
+            return result
+        }
+        return value
+    }
+    #endif
 
     /// Adds (or replaces) a file, copying ownership, mode and dates from
     /// `template` — an existing file — unless `mode` overrides the
