@@ -227,7 +227,11 @@ final class RootFilesystemBuilder {
             throw HFSPlusError.corrupt("\(path) isn't a dictionary property list")
         }
         edit(plist)
+        #if canImport(Darwin)
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: format, options: 0)
+        #else
+        let data = PlistXMLWriter.data(plist)   // corelibs can't write plists reliably: error 3851
+        #endif
         try replaceContents(of: path, with: [UInt8](data))
     }
 
@@ -634,6 +638,10 @@ enum RootFilesystemRecipe {
     }
 
     private static func binaryPlist(_ dictionary: [String: Any]) throws -> [UInt8] {
-        [UInt8](try PropertyListSerialization.data(fromPropertyList: dictionary, format: .binary, options: 0))
+        #if canImport(Darwin)
+        return [UInt8](try PropertyListSerialization.data(fromPropertyList: dictionary, format: .binary, options: 0))
+        #else
+        return [UInt8](PlistXMLWriter.data(dictionary))
+        #endif
     }
 }
