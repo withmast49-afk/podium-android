@@ -18,8 +18,9 @@ class ScreenView(context: Context) : SurfaceView(context), SurfaceHolder.Callbac
     private var renderer: Renderer? = null
 
     init {
+        // No setBackgroundColor here: a SurfaceView's own background is drawn over the surface
+        // and would hide every frame. The renderer paints black itself.
         holder.addCallback(this)
-        setBackgroundColor(Color.BLACK)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
