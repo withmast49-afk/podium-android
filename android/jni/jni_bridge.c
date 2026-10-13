@@ -17,6 +17,9 @@ extern int podium_status(char *out, int capacity);
 extern int podium_log_tail(char *out, int capacity);
 extern int podium_install_ipas(const char *ipsw, const char *dataDir, const char *ipaPaths, char *out, int capacity);
 extern int podium_probe_jit(void);
+extern int podium_install_debs(const char *ipsw, const char *dataDir, const char *debPaths, char *out, int capacity);
+extern int podium_add_files(const char *dataDir, const char *filePaths, char *out, int capacity);
+extern int podium_probe_storage(const char *directory);
 extern int podium_frame_width(void);
 extern int podium_frame_height(void);
 extern int podium_copy_frame(void *buffer, int capacity);
@@ -97,6 +100,45 @@ JNIEXPORT jstring JNICALL JNI(installIpas)(JNIEnv *env, jclass cls, jstring ipsw
     char line[2100];
     snprintf(line, sizeof(line), "%d|%s", code, message);
     return (*env)->NewStringUTF(env, line);
+}
+
+JNIEXPORT jstring JNICALL JNI(installDebs)(JNIEnv *env, jclass cls, jstring ipsw, jstring dataDir, jstring debPaths) {
+    (void)cls;
+    const char *a = (*env)->GetStringUTFChars(env, ipsw, NULL);
+    const char *b = (*env)->GetStringUTFChars(env, dataDir, NULL);
+    const char *c = (*env)->GetStringUTFChars(env, debPaths, NULL);
+    char message[2048];
+    message[0] = 0;
+    int code = podium_install_debs(a, b, c, message, (int)sizeof(message));
+    (*env)->ReleaseStringUTFChars(env, ipsw, a);
+    (*env)->ReleaseStringUTFChars(env, dataDir, b);
+    (*env)->ReleaseStringUTFChars(env, debPaths, c);
+    char line[2100];
+    snprintf(line, sizeof(line), "%d|%s", code, message);
+    return (*env)->NewStringUTF(env, line);
+}
+
+JNIEXPORT jstring JNICALL JNI(addFiles)(JNIEnv *env, jclass cls, jstring dataDir, jstring filePaths) {
+    (void)cls;
+    const char *a = (*env)->GetStringUTFChars(env, dataDir, NULL);
+    const char *b = (*env)->GetStringUTFChars(env, filePaths, NULL);
+    char message[2048];
+    message[0] = 0;
+    int code = podium_add_files(a, b, message, (int)sizeof(message));
+    (*env)->ReleaseStringUTFChars(env, dataDir, a);
+    (*env)->ReleaseStringUTFChars(env, filePaths, b);
+    char line[2100];
+    snprintf(line, sizeof(line), "%d|%s", code, message);
+    return (*env)->NewStringUTF(env, line);
+}
+
+// 0 if the directory can hold the live guest disk, else an errno.
+JNIEXPORT jint JNICALL JNI(probeStorage)(JNIEnv *env, jclass cls, jstring directory) {
+    (void)cls;
+    const char *path = (*env)->GetStringUTFChars(env, directory, NULL);
+    int result = podium_probe_storage(path);
+    (*env)->ReleaseStringUTFChars(env, directory, path);
+    return result;
 }
 
 JNIEXPORT jint JNICALL JNI(probeJit)(JNIEnv *env, jclass cls) {

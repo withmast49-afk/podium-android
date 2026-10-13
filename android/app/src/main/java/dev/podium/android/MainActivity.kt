@@ -31,7 +31,7 @@ import java.util.Locale
 
 /**
  * Two tabs. Player: pick an iPod touch 4 / iOS 6.1.6 (10B500) IPSW, power on, play.
- * Settings: theme, dynamic color, JIT status, IPA install, logs.
+ * Settings: where the iPod lives, theme, JIT status, IPA / .deb / file import, logs.
  * Everything heavy happens in the Swift core (libPodiumNative.so).
  */
 class MainActivity : AppCompatActivity() {
@@ -51,39 +51,59 @@ class MainActivity : AppCompatActivity() {
     private lateinit var powerOffButton: MaterialButton
     private lateinit var jitSwitch: MaterialSwitch
     private lateinit var jitText: TextView
+    private lateinit var storagePath: TextView
+    private lateinit var storageNote: TextView
+    private lateinit var storageAccessButton: MaterialButton
+    private lateinit var openFolderButton: MaterialButton
     private lateinit var installIpaButton: MaterialButton
+    private lateinit var installDebButton: MaterialButton
+    private lateinit var importFilesButton: MaterialButton
     private lateinit var logPreview: TextView
 
-    private val firmwareDir by lazy { File(filesDir, "firmware").apply { mkdirs() } }
-    private val ipswFile by lazy { File(firmwareDir, "podium.ipsw") }
-    private val supportDir by lazy { File(filesDir, "support").apply { mkdirs() } }
+    /** Where the iPod currently lives; starts private and is upgraded by [reloadStorage]. */
+    @Volatile private lateinit var layout: DeviceStorage.Layout
     private val toolsDir by lazy { File(filesDir, "guest-tools").apply { mkdirs() } }
 
     @Volatile private var toolsReady = false
-    @Volatile private var importing = false
-    @Volatile private var installingIpas = false
+    @Volatile private var importing = false          // copying the IPSW or moving the device
+    @Volatile private var busyWithFiles = false      // installing IPA/.deb or importing files
     @Volatile private var ipswBootable = false
     @Volatile private var alive = true
     @Volatile private var onSettingsPage = false
     @Volatile private var lastStage = PodiumNative.STAGE_IDLE
     @Volatile private var lastStatus: PodiumStatus? = null
-    @Volatile private var jitProbe = -1          // -1 not probed yet; else 0, 1 or 2
+    @Volatile private var jitProbe = -1              // -1 not probed yet; else 0, 1 or 2
+    @Volatile private var lastStorageCheck = 0L
+    private var offeredMove = false
     private var firmwareSummary = ""
 
     private val toolNames = listOf("keybag_bootstrap.bin", "podium_syncd.bin", "first_boot_state.plist", "boot_read_files.txt")
 
-    private val pickIpsw = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) importIpsw(uri)
+    private val pickIpsw = registerForActivityResult(OpenFilesAtDevice()) { uris ->
+        uris.firstOrNull()?.let { importIpsw(it) }
     }
-    private val pickIpas = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+    private val pickIpas = registerForActivityResult(OpenFilesAtDevice()) { uris ->
         if (uris.isNotEmpty()) installIpas(uris)
+    }
+    private val pickDebs = registerForActivityResult(OpenFilesAtDevice()) { uris ->
+        if (uris.isNotEmpty()) installDebs(uris)
+    }
+    private val pickFiles = registerForActivityResult(OpenFilesAtDevice()) { uris ->
+        if (uris.isNotEmpty()) importFiles(uris)
     }
     private val saveLog = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) writeLog(uri)
     }
+    private val accessSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        reloadStorage(force = true)
+    }
+    private val legacyPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        reloadStorage(force = true)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         settings = AppSettings(this)
+        layout = DeviceStorage.privateLayout(this)   // not in a property initializer: no Context yet there
         AppCompatDelegate.setDefaultNightMode(settings.themeMode)
         if (settings.dynamicColor && DynamicColors.isDynamicColorAvailable()) DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
@@ -102,7 +122,13 @@ class MainActivity : AppCompatActivity() {
         powerOffButton = findViewById(R.id.powerOffButton)
         jitSwitch = findViewById(R.id.jitSwitch)
         jitText = findViewById(R.id.jitText)
+        storagePath = findViewById(R.id.storagePath)
+        storageNote = findViewById(R.id.storageNote)
+        storageAccessButton = findViewById(R.id.storageAccessButton)
+        openFolderButton = findViewById(R.id.openFolderButton)
         installIpaButton = findViewById(R.id.installIpaButton)
+        installDebButton = findViewById(R.id.installDebButton)
+        importFilesButton = findViewById(R.id.importFilesButton)
         logPreview = findViewById(R.id.logPreview)
         progress.max = 1000
 
@@ -110,6 +136,10 @@ class MainActivity : AppCompatActivity() {
         powerOnButton.setOnClickListener { powerOn() }
         powerOffButton.setOnClickListener { powerOff() }
         installIpaButton.setOnClickListener { pickIpas.launch(arrayOf("*/*")) }
+        installDebButton.setOnClickListener { pickDebs.launch(arrayOf("*/*")) }
+        importFilesButton.setOnClickListener { pickFiles.launch(arrayOf("*/*")) }
+        storageAccessButton.setOnClickListener { requestFileAccess() }
+        openFolderButton.setOnClickListener { openFolder() }
         findViewById<View>(R.id.btnSleep).holdsButton(1)
         findViewById<View>(R.id.btnVolDown).holdsButton(3)
         findViewById<View>(R.id.btnHome).holdsButton(0)
@@ -118,16 +148,21 @@ class MainActivity : AppCompatActivity() {
         setUpNavigation(savedInstanceState?.getInt(STATE_PAGE) ?: 0)
         setUpAppearance()
         setUpLogButtons()
+        renderStorage()
         findViewById<TextView>(R.id.aboutText).text =
             "Podium for Android ${appVersion()} · runs iPod touch 4, iOS 6.1.6 (10B500)"
 
         Thread {
             jitProbe = PodiumNative.probeJit()
             prepareGuestTools()
-            if (ipswFile.exists()) inspectFirmware()
             ui.post { refresh() }
         }.start()
         startPolling()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        reloadStorage(force = false)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -192,6 +227,100 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // MARK: Storage (Documents/ios)
+
+    private fun deviceIsActive() =
+        lastStage == PodiumNative.STAGE_PREPARING || lastStage == PodiumNative.STAGE_LOADING_KERNEL ||
+            lastStage == PodiumNative.STAGE_BOOTING || lastStage == PodiumNative.STAGE_RUNNING
+
+    /** Re-checks where the iPod should live (file access may have just been granted) and picks up its IPSW. */
+    private fun reloadStorage(force: Boolean) {
+        if (deviceIsActive() || importing || busyWithFiles) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastStorageCheck < 2000) return
+        lastStorageCheck = now
+        Thread {
+            val resolved = DeviceStorage.resolve(this)
+            layout = resolved
+            if (resolved.ipsw.exists()) inspectFirmware() else {
+                ipswBootable = false
+                firmwareSummary = ""
+                ui.post { firmwareText.text = "No firmware yet. Pick an iPod touch 4 IPSW for iOS 6.1.6 (10B500)." }
+            }
+            ui.post {
+                renderStorage()
+                refresh()
+                offerMoveFromPrivate()
+            }
+        }.start()
+    }
+
+    private fun renderStorage() {
+        val current = layout
+        storagePath.text = current.displayPath
+        storageNote.text = when {
+            current.shared -> "The whole iPod (IPSW, system image, disk) lives here. Browse it from any file manager."
+            current.note.isNotEmpty() -> current.note
+            else -> "Stored in the app's private storage."
+        }
+        storageAccessButton.visibility = if (DeviceStorage.hasFileAccess(this)) View.GONE else View.VISIBLE
+        openFolderButton.isEnabled = current.shared
+    }
+
+    private fun requestFileAccess() {
+        val intent = DeviceStorage.accessSettingsIntent(this)
+        if (intent != null) {
+            try {
+                accessSettings.launch(intent)
+            } catch (_: Exception) {
+                snack("Open Settings > Apps > Podium > Permissions and allow access to all files.")
+            }
+        } else {
+            legacyPermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+
+    private fun openFolder() {
+        if (!DeviceStorage.openInFileManager(this)) snack("Open your file manager and go to ${layout.displayPath}")
+    }
+
+    /** If the iPod was built in private storage before, offer to carry it over to Documents/ios. */
+    private fun offerMoveFromPrivate() {
+        val current = layout
+        val old = DeviceStorage.privateLayout(this)
+        if (!current.shared || offeredMove || current.ipsw.exists() || !old.ipsw.exists() || deviceIsActive()) return
+        offeredMove = true
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Move your iPod to Documents/ios?")
+            .setMessage("Your IPSW and iOS disk are in the app's private storage. Moving copies them (several GB) to ${current.displayPath}, then removes the private copy.")
+            .setPositiveButton("Move") { _, _ -> moveFromPrivate(old, current) }
+            .setNegativeButton("Not now", null)
+            .show()
+    }
+
+    private fun moveFromPrivate(old: DeviceStorage.Layout, target: DeviceStorage.Layout) {
+        importing = true
+        refresh()
+        Thread {
+            try {
+                ui.post { statusText.text = "Moving the iPod to Documents/ios… (keep the app open)" }
+                for ((from, to) in listOf(old.firmwareDir to target.firmwareDir, old.deviceDir to target.deviceDir)) {
+                    if (!from.exists()) continue
+                    to.mkdirs()
+                    from.copyRecursively(to, overwrite = true)
+                    from.deleteRecursively()
+                }
+                inspectFirmware()
+                ui.post { snack("Moved to ${target.displayPath}") }
+            } catch (error: Exception) {
+                ui.post { snack("Move failed: ${error.message}. Your files in private storage are untouched.") }
+            } finally {
+                importing = false
+                ui.post { refresh() }
+            }
+        }.start()
+    }
+
     // MARK: Status polling
 
     private fun startPolling() {
@@ -208,7 +337,7 @@ class MainActivity : AppCompatActivity() {
     private fun render(status: PodiumStatus, logLines: List<String>?) {
         lastStage = status.stage
         lastStatus = status
-        if (!importing && !installingIpas && toolsReady) {
+        if (!importing && !busyWithFiles && toolsReady) {
             statusText.text = when (status.stage) {
                 PodiumNative.STAGE_IDLE -> if (ipswBootable) "Ready" else "Pick an IPSW to begin"
                 PodiumNative.STAGE_STOPPED, PodiumNative.STAGE_ERROR -> status.message
@@ -250,16 +379,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun refresh() {
         val idle = lastStage == PodiumNative.STAGE_IDLE || lastStage == PodiumNative.STAGE_STOPPED || lastStage == PodiumNative.STAGE_ERROR
-        importButton.isEnabled = idle && !importing && !installingIpas
-        powerOnButton.isEnabled = idle && !importing && !installingIpas && toolsReady && ipswBootable
+        val free = idle && !importing && !busyWithFiles
+        importButton.isEnabled = free
+        powerOnButton.isEnabled = free && toolsReady && ipswBootable
         powerOffButton.isEnabled = lastStage >= PodiumNative.STAGE_LOADING_KERNEL && lastStage != PodiumNative.STAGE_STOPPED
-        installIpaButton.isEnabled = idle && !importing && !installingIpas && ipswBootable
+        installIpaButton.isEnabled = free && ipswBootable
+        installDebButton.isEnabled = free && ipswBootable
+        importFilesButton.isEnabled = free && ipswBootable
     }
 
     // MARK: Player actions
 
     private fun powerOn() {
-        val result = PodiumNative.start(ipswFile.absolutePath, supportDir.absolutePath, toolsDir.absolutePath)
+        val current = layout
+        current.deviceDir.mkdirs()
+        val result = PodiumNative.start(current.ipsw.absolutePath, current.deviceDir.absolutePath, toolsDir.absolutePath)
         if (result != 0) snack("Couldn't start (code $result).")
     }
 
@@ -296,16 +430,18 @@ class MainActivity : AppCompatActivity() {
     private fun importIpsw(uri: Uri) {
         importing = true
         refresh()
+        val current = layout
         Thread {
             try {
                 var total = -1L
                 contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
                     if (cursor.moveToFirst()) total = cursor.getLong(0)
                 }
-                // The IPSW, a decrypted copy of its root filesystem, and the guest disks all live in app storage.
-                if (filesDir.usableSpace < 5L shl 30) ui.post { snack("Podium needs roughly 5 GB free; low storage may make the first launch fail.") }
+                // The IPSW, a decrypted copy of its root filesystem, and the guest disks all live next to each other.
+                current.firmwareDir.mkdirs()
+                if (current.firmwareDir.usableSpace < 5L shl 30) ui.post { snack("Podium needs roughly 5 GB free; low storage may make the first launch fail.") }
 
-                val temporary = File(firmwareDir, "incoming.ipsw")
+                val temporary = File(current.firmwareDir, "incoming.ipsw")
                 var copied = 0L
                 var lastShown = 0L
                 contentResolver.openInputStream(uri)!!.use { input ->
@@ -329,8 +465,8 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
-                ipswFile.delete()
-                if (!temporary.renameTo(ipswFile)) throw IllegalStateException("couldn't move the copied IPSW into place")
+                current.ipsw.delete()
+                if (!temporary.renameTo(current.ipsw)) throw IllegalStateException("couldn't move the copied IPSW into place")
                 inspectFirmware()
             } catch (error: Exception) {
                 ui.post { snack("Import failed: ${error.message}") }
@@ -343,7 +479,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Asks the core what this IPSW is and whether Podium can boot it. */
     private fun inspectFirmware() {
-        val parts = PodiumNative.inspect(ipswFile.absolutePath).split("|")
+        val parts = PodiumNative.inspect(layout.ipsw.absolutePath).split("|")
         val code = parts.getOrNull(0)?.toIntOrNull() ?: -1
         ipswBootable = code == 1
         firmwareSummary = when (code) {
@@ -353,42 +489,64 @@ class MainActivity : AppCompatActivity() {
         ui.post { firmwareText.text = firmwareSummary }
     }
 
-    // MARK: IPA install
+    // MARK: IPA / .deb / file import (all need the iPod powered off)
 
-    private fun installIpas(uris: List<Uri>) {
-        installingIpas = true
-        statusText.text = "Installing apps…"
+    private fun installIpas(uris: List<Uri>) = runStaged(
+        uris, "Installing apps…", "Couldn't install",
+        { count -> "Installed $count app${if (count == 1) "" else "s"}" },
+        "Copied into /Applications. Start iOS to use it; apps that aren't signed or registered may not appear on the home screen.",
+    ) { paths -> PodiumNative.installIpas(layout.ipsw.absolutePath, layout.deviceDir.absolutePath, paths.joinToString("\n")) }
+
+    private fun installDebs(uris: List<Uri>) = runStaged(
+        uris, "Installing packages…", "Couldn't install",
+        { count -> "Installed $count package${if (count == 1) "" else "s"}" },
+        "Installed offline into the iPod's disk. Packages that run install scripts are rejected.",
+    ) { paths -> PodiumNative.installDebs(layout.ipsw.absolutePath, layout.deviceDir.absolutePath, paths.joinToString("\n")) }
+
+    private fun importFiles(uris: List<Uri>) = runStaged(
+        uris, "Importing files…", "Couldn't import",
+        { count -> "Imported $count file${if (count == 1) "" else "s"}" },
+        "Saved on the iPod in /private/var/mobile/Media/Podium.",
+    ) { paths -> PodiumNative.addFiles(layout.deviceDir.absolutePath, paths.joinToString("\n")) }
+
+    /**
+     * Copies the picked files to a scratch folder (keeping their names), runs [call] with the paths and shows the result.
+     * [call] returns "count|message": count >= 0 on success, -1 with the reason otherwise.
+     */
+    private fun runStaged(
+        uris: List<Uri>, busyText: String, failTitle: String, successTitle: (Int) -> String, successNote: String,
+        call: (List<String>) -> String,
+    ) {
+        busyWithFiles = true
+        statusText.text = busyText
         refresh()
         Thread {
-            val staging = File(cacheDir, "ipa-import")
-            var title = "IPA install"
+            val staging = File(cacheDir, "import")
+            var title = failTitle
             var message = ""
             try {
                 staging.deleteRecursively()
                 staging.mkdirs()
                 val paths = uris.mapIndexed { index, uri ->
                     val folder = File(staging, index.toString()).apply { mkdirs() }
-                    val target = File(folder, displayName(uri) ?: "app$index.ipa")
+                    val target = File(folder, displayName(uri) ?: "file$index")
                     contentResolver.openInputStream(uri)!!.use { input -> FileOutputStream(target).use { input.copyTo(it) } }
                     target.absolutePath
                 }
-                val result = PodiumNative.installIpas(ipswFile.absolutePath, supportDir.absolutePath, paths.joinToString("\n"))
-                val parts = result.split("|", limit = 2)
+                val parts = call(paths).split("|", limit = 2)
                 val count = parts.getOrNull(0)?.toIntOrNull() ?: -1
                 val text = parts.getOrNull(1).orEmpty()
                 if (count >= 0) {
-                    title = "Installed $count app${if (count == 1) "" else "s"}"
-                    message = "$text\n\nCopied into /Applications. Start iOS to use it; apps that aren't signed or registered may not appear on the home screen."
+                    title = successTitle(count)
+                    message = if (successNote.isEmpty()) text else "$text\n\n$successNote"
                 } else {
-                    title = "Couldn't install"
                     message = text
                 }
             } catch (error: Exception) {
-                title = "Couldn't install"
                 message = error.message ?: error.toString()
             } finally {
                 staging.deleteRecursively()
-                installingIpas = false
+                busyWithFiles = false
             }
             ui.post {
                 refresh()
@@ -425,7 +583,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** A header with what's needed to debug (device, JIT, state), then the core's log. */
+    /** A header with what's needed to debug (device, JIT, storage, state), then the core's log. */
     private fun buildLogReport(): String {
         val status = lastStatus
         val jit = when {
@@ -439,6 +597,7 @@ class MainActivity : AppCompatActivity() {
             appendLine("Podium for Android ${appVersion()}")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown ABI"}")
+            appendLine("Storage: ${layout.displayPath} (${if (layout.shared) "shared" else "private"})")
             appendLine("Firmware: ${firmwareSummary.ifEmpty { "none" }}")
             appendLine("State: ${status?.message?.ifEmpty { "-" } ?: "-"} (stage ${status?.stage ?: -1})")
             appendLine("JIT: $jit")

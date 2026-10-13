@@ -30,6 +30,14 @@ void podium_clear_cache(void *start, size_t length);
 /// Returns a PodiumJITMode value (0 = no JIT on this device).
 int podium_jit_probe(void);
 
+/* ---- Storage ---- */
+
+/// Checks that `directory` can hold the live guest disk: the core maps that file
+/// MAP_SHARED + PROT_WRITE, which some filesystems (FUSE-backed shared storage)
+/// refuse. Creates and removes a small probe file. Returns 0 if it works,
+/// otherwise the errno of the step that failed.
+int podium_probe_shared_mmap(const char *directory);
+
 /* ---- AES (128/192/256), ECB or CBC, no padding ---- */
 
 /// `length` must be a multiple of 16. `iv` (16 bytes) is only read for CBC.

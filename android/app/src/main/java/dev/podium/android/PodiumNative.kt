@@ -35,6 +35,15 @@ object PodiumNative {
     /** "count|names" (count >= 0) or "-1|reason". [ipaPaths] are newline-separated file paths. */
     @JvmStatic external fun installIpas(ipsw: String, dataDir: String, ipaPaths: String): String
 
+    /** "count|names" (count >= 0) or "-1|reason" for script-free .deb packages. */
+    @JvmStatic external fun installDebs(ipsw: String, dataDir: String, debPaths: String): String
+
+    /** "count|where" (count >= 0) or "-1|reason": copies any files into the iPod's Media/Podium folder. */
+    @JvmStatic external fun addFiles(dataDir: String, filePaths: String): String
+
+    /** 0 if [directory] can hold the live iPod disk (shared writable mmap works there), else an errno. */
+    @JvmStatic external fun probeStorage(directory: String): Int
+
     /** What the DBT could get from this device: 0 no JIT, 1 RWX memory, 2 dual-mapped memory. */
     @JvmStatic external fun probeJit(): Int
     @JvmStatic external fun frameWidth(): Int

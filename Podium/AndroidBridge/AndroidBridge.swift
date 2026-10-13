@@ -114,6 +114,41 @@ final class AndroidHost: @unchecked Sendable {
         }
     }
 
+    /// Installs script-free .deb packages (tweaks, Cydia payloads) into the guest's root. The iPod must be off.
+    func installPackages(ipsw: URL, dataDir: URL, debs: [URL]) -> (code: Int32, message: String) {
+        lock.lock()
+        let busy = session != nil || bootInFlight
+        lock.unlock()
+        do {
+            let storage = PersistentGuestStorage(appSupportURL: dataDir)
+            let installed = try storage.installDebianPackages(debs, forFirmwareAt: ipsw, emulatorIsBusy: busy)
+            let names = installed.map { "\($0.name) \($0.version)" }.joined(separator: ", ")
+            append("Installed \(installed.count) package(s): \(names)")
+            return (Int32(installed.count), names)
+        } catch {
+            let text = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            append("Package install failed: \(text)")
+            return (-1, text)
+        }
+    }
+
+    /// Copies any files into /private/var/mobile/Media/Podium on the guest disk. The iPod must be off.
+    func addFiles(dataDir: URL, files: [URL]) -> (code: Int32, message: String) {
+        lock.lock()
+        let busy = session != nil || bootInFlight
+        lock.unlock()
+        do {
+            let storage = PersistentGuestStorage(appSupportURL: dataDir)
+            try storage.addFiles(files, emulatorIsBusy: busy)
+            append("Copied \(files.count) file(s) into the iPod.")
+            return (Int32(files.count), "/private/var/mobile/Media/Podium")
+        } catch {
+            let text = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            append("File import failed: \(text)")
+            return (-1, text)
+        }
+    }
+
     // MARK: Power on
 
     func start(ipsw: URL, dataDir: URL, assets: URL) -> Bool {
@@ -425,6 +460,41 @@ public func podium_install_ipas(_ ipsw: UnsafePointer<CChar>?, _ dataDir: Unsafe
     let result = AndroidHost.shared.installIPAs(ipsw: ipswURL, dataDir: dataURL, ipas: ipas)
     _ = writeCString(result.message, to: out, capacity: capacity)
     return result.code
+}
+
+/// Installs .deb packages (paths separated by newlines). Returns the package count (>= 0), or -1 with the reason in `out`.
+@_cdecl("podium_install_debs")
+public func podium_install_debs(_ ipsw: UnsafePointer<CChar>?, _ dataDir: UnsafePointer<CChar>?, _ debPaths: UnsafePointer<CChar>?,
+                                _ out: UnsafeMutablePointer<CChar>?, _ capacity: Int32) -> Int32 {
+    guard let ipswURL = url(ipsw), let dataURL = url(dataDir), let debPaths else {
+        _ = writeCString("Missing arguments.", to: out, capacity: capacity)
+        return -1
+    }
+    let debs = String(cString: debPaths).split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
+    let result = AndroidHost.shared.installPackages(ipsw: ipswURL, dataDir: dataURL, debs: debs)
+    _ = writeCString(result.message, to: out, capacity: capacity)
+    return result.code
+}
+
+/// Copies any files (paths separated by newlines) into the iPod's Media/Podium folder.
+@_cdecl("podium_add_files")
+public func podium_add_files(_ dataDir: UnsafePointer<CChar>?, _ filePaths: UnsafePointer<CChar>?,
+                             _ out: UnsafeMutablePointer<CChar>?, _ capacity: Int32) -> Int32 {
+    guard let dataURL = url(dataDir), let filePaths else {
+        _ = writeCString("Missing arguments.", to: out, capacity: capacity)
+        return -1
+    }
+    let files = String(cString: filePaths).split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
+    let result = AndroidHost.shared.addFiles(dataDir: dataURL, files: files)
+    _ = writeCString(result.message, to: out, capacity: capacity)
+    return result.code
+}
+
+/// 0 if `directory` can hold the live guest disk (shared writable mmap works there), else an errno.
+@_cdecl("podium_probe_storage")
+public func podium_probe_storage(_ directory: UnsafePointer<CChar>?) -> Int32 {
+    guard let directory else { return 22 }
+    return podium_probe_shared_mmap(directory)
 }
 
 /// Whether this device lets the DBT have executable memory: 0 no, 1 RWX mapping, 2 dual mapping.
