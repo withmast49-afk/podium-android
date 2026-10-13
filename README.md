@@ -1,7 +1,7 @@
 
 # Podium
 
-Podium is an multi **iPod Touch** emulator for android. Currently, these are the supported android versions:
+Podium is an **iPod Touch** emulator for Android. Currently, these are the supported iOS versions:
 
 | Device               | iOS Version |
 | -------------------- | ----------- |
@@ -11,7 +11,7 @@ Podium is an multi **iPod Touch** emulator for android. Currently, these are the
 
 | iOS Version        | Method                                                   |
 | ------------------ | -------------------------------------------------------- |
-| android 8+          | jit.                                                    |
-| iOS 17.4 and below | 🚫 No currently supported method for JIT; may still work |
+| Android below 14         |    Untested, unknown, maybe it still work                                                 |
+| Android 14+ | Jit working |
 
 Fork of [leviidev/podium](https://github.com/Leviidev/Podium/tree/main) - original is ios only, this is the android port.
