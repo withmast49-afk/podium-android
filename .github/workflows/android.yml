@@ -20,6 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A hosted runner has ~14 GB free; Swift + the Android SDK + the NDK + the build eat nearly all of it.
+      # Drop the preinstalled toolchains we don't use (not the Android SDK: Gradle needs it).
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /usr/local/graalvm \
+            /usr/local/share/powershell /usr/share/swift /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          df -h /
+
       - name: Check the C support code (AES, SHA-1, inflate) against Python
         run: |
           pip install cryptography
@@ -44,10 +55,13 @@ jobs:
         run: |
           curl -fSL -o ndk.zip "$NDK_URL"
           unzip -qo ndk.zip
+          rm -f ndk.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r30" >> "$GITHUB_ENV"
 
       - name: Build libPodiumNative.so + JNI glue
-        run: bash tools/build-android.sh
+        run: |
+          bash tools/build-android.sh
+          df -h /
 
       - uses: actions/setup-java@v4
         with:
