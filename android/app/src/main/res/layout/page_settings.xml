@@ -72,7 +72,7 @@
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_right="4dp"
+                        android:layout_marginEnd="4dp"
                         android:layout_weight="1"
                         android:text="Allow access" />
 
@@ -81,7 +81,7 @@
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_left="4dp"
+                        android:layout_marginStart="4dp"
                         android:layout_weight="1"
                         android:text="Open folder" />
                 </LinearLayout>
@@ -319,7 +319,7 @@
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_right="4dp"
+                        android:layout_marginEnd="4dp"
                         android:layout_weight="1"
                         android:text="Install IPA…" />
 
@@ -328,7 +328,7 @@
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_left="4dp"
+                        android:layout_marginStart="4dp"
                         android:layout_weight="1"
                         android:text="Install .deb…" />
                 </LinearLayout>
@@ -460,7 +460,7 @@
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_right="4dp"
+                        android:layout_marginEnd="4dp"
                         android:layout_weight="1"
                         android:text="Copy log" />
 
@@ -469,7 +469,7 @@
                         style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:layout_left="4dp"
+                        android:layout_marginStart="4dp"
                         android:layout_weight="1"
                         android:text="Save log" />
                 </LinearLayout>
