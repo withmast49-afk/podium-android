@@ -20,6 +20,8 @@ extern int podium_probe_jit(void);
 extern int podium_install_debs(const char *ipsw, const char *dataDir, const char *debPaths, char *out, int capacity);
 extern int podium_add_files(const char *dataDir, const char *filePaths, char *out, int capacity);
 extern int podium_probe_storage(const char *directory);
+extern int podium_export_files(const char *ipsw, const char *dataDir, const char *guestPath, const char *destDir, char *out, int capacity);
+extern int podium_dev_info(char *out, int capacity);
 extern int podium_frame_width(void);
 extern int podium_frame_height(void);
 extern int podium_copy_frame(void *buffer, int capacity);
@@ -130,6 +132,33 @@ JNIEXPORT jstring JNICALL JNI(addFiles)(JNIEnv *env, jclass cls, jstring dataDir
     char line[2100];
     snprintf(line, sizeof(line), "%d|%s", code, message);
     return (*env)->NewStringUTF(env, line);
+}
+
+// "count|summary" on success (count >= 0), "-1|reason" on failure.
+JNIEXPORT jstring JNICALL JNI(exportFiles)(JNIEnv *env, jclass cls, jstring ipsw, jstring dataDir, jstring guestPath, jstring destDir) {
+    (void)cls;
+    const char *a = (*env)->GetStringUTFChars(env, ipsw, NULL);
+    const char *b = (*env)->GetStringUTFChars(env, dataDir, NULL);
+    const char *c = (*env)->GetStringUTFChars(env, guestPath, NULL);
+    const char *d = (*env)->GetStringUTFChars(env, destDir, NULL);
+    char message[2048];
+    message[0] = 0;
+    int code = podium_export_files(a, b, c, d, message, (int)sizeof(message));
+    (*env)->ReleaseStringUTFChars(env, ipsw, a);
+    (*env)->ReleaseStringUTFChars(env, dataDir, b);
+    (*env)->ReleaseStringUTFChars(env, guestPath, c);
+    (*env)->ReleaseStringUTFChars(env, destDir, d);
+    char line[2100];
+    snprintf(line, sizeof(line), "%d|%s", code, message);
+    return (*env)->NewStringUTF(env, line);
+}
+
+JNIEXPORT jstring JNICALL JNI(devInfo)(JNIEnv *env, jclass cls) {
+    (void)cls;
+    char text[4096];
+    text[0] = 0;
+    podium_dev_info(text, (int)sizeof(text));
+    return (*env)->NewStringUTF(env, text);
 }
 
 // 0 if the directory can hold the live guest disk, else an errno.

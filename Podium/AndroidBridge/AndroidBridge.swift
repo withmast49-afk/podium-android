@@ -38,6 +38,7 @@ final class AndroidHost: @unchecked Sendable {
     private var rateSamples: [(time: Date, retired: UInt64)] = []
     private var instructionsPerSecond = 0.0
     private var jitAvailable = false
+    private var displayLogged = false
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -161,6 +162,7 @@ final class AndroidHost: @unchecked Sendable {
         secondsRemaining = -1
         message = "Reading the firmware…"
         logLines.removeAll()
+        displayLogged = false
         appendLocked("Powering on \(ipsw.lastPathComponent).")
         lock.unlock()
         spawnBoot()
@@ -306,14 +308,22 @@ final class AndroidHost: @unchecked Sendable {
         lock.unlock()
 
         var lockScreen = false
+        var displayOn = false
         var snapshot: EmulationSession.Snapshot?
         if let activeSession {
             snapshot = activeSession.snapshot()
-            if currentStage == .booting { lockScreen = Self.lockScreenIsUp(activeSession.display) }
+            if currentStage == .booting {
+                displayOn = !activeSession.display.activeLayers.isEmpty
+                lockScreen = Self.lockScreenIsUp(activeSession.display)
+            }
         }
 
         lock.lock()
         defer { lock.unlock() }
+        if displayOn && !displayLogged {
+            displayLogged = true
+            appendLocked("Display is on: iOS started drawing.")
+        }
         if let snapshot, session != nil {
             jitAvailable = snapshot.jitAvailable
             let now = Date()
@@ -355,6 +365,102 @@ final class AndroidHost: @unchecked Sendable {
             if sum > 3 * 48 { bright += 1 }
         }
         return Double(bright) / Double(max(sampled, 1)) > 0.4
+    }
+
+    // MARK: Developer info
+
+    /// Live CPU / emulator details for the Developer options card (plain "key: value" lines).
+    func devInfo() -> String {
+        lock.lock()
+        let active = session
+        lock.unlock()
+        guard let active else { return "Emulator: not running" }
+        let snapshot = active.snapshot()
+        let cpu = active.cpu
+        func hex(_ value: UInt32) -> String { String(format: "%08X", value) }
+        var lines: [String] = []
+        switch snapshot.state {
+        case .running: lines.append("State: running")
+        case .stopped: lines.append("State: stopped")
+        case .shutDown: lines.append("State: shut down")
+        case .restarting: lines.append("State: restarting")
+        case .panicked(let text): lines.append("State: panicked (\(text))")
+        case .halted(let reason): lines.append("State: halted (\(reason))")
+        }
+        lines.append("Instructions retired: \(snapshot.retiredInstructions)")
+        lines.append("Virtual time: \(snapshot.virtualTime)")
+        lines.append("JIT (DBT) available: \(snapshot.jitAvailable ? "yes" : "no")")
+        lines.append("Guest RAM: \(GuestMemoryLayout.ramSize >> 20) MB at 0x\(hex(GuestMemoryLayout.ramPhysicalBase))")
+        let flags = cpu.cpsr
+        lines.append("CPSR flags: \(flags.negative ? "N" : "-")\(flags.zero ? "Z" : "-")\(flags.carry ? "C" : "-")\(flags.overflow ? "V" : "-")")
+        lines.append("PC: 0x\(hex(cpu.registers.pc))")
+        for index in 0..<16 where index != Registers.pcIndex {
+            lines.append("r\(index): 0x\(hex(cpu.registers[index]))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // MARK: Export iOS files
+
+    private struct ExportStats {
+        var files = 0
+        var folders = 0
+        var skipped = 0
+        var bytes: UInt64 = 0
+        var firstProblem: String?
+    }
+
+    /// Copies a folder of the guest disk to `destination` as ordinary files (a read-only snapshot).
+    /// Symbolic links and anything unreadable are skipped. The iPod must be off.
+    func exportFiles(ipsw: URL, dataDir: URL, guestPath: String, destination: URL) -> (code: Int32, message: String) {
+        lock.lock()
+        let busy = session != nil || bootInFlight
+        lock.unlock()
+        if busy { return (-1, "Power the iPod off first; its disk is in use.") }
+        do {
+            let storage = PersistentGuestStorage(appSupportURL: dataDir)
+            let image = try storage.prepareUserVolume(forFirmwareAt: ipsw).url
+            let volume = try HFSPlusVolume(source: FileVolumeSource(url: image))
+            let builder = try RootFilesystemBuilder(volume: volume)
+            guard builder.contains(guestPath) else { return (-1, "\(guestPath) doesn't exist on the iPod's disk.") }
+            var stats = ExportStats()
+            append("Exporting \(guestPath) to \(destination.path)…")
+            try exportTree(builder, guestPath, to: destination, stats: &stats)
+            let megabytes = Double(stats.bytes) / 1_048_576
+            var message = "\(stats.files) files in \(stats.folders) folders (\(String(format: "%.1f", megabytes)) MB)"
+            if stats.skipped > 0 { message += ", \(stats.skipped) skipped" }
+            if let problem = stats.firstProblem { message += "\nFirst problem: \(problem)" }
+            append("Export done: \(message)")
+            return (Int32(min(stats.files, Int(Int32.max))), message)
+        } catch {
+            let text = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            append("Export failed: \(text)")
+            return (-1, text)
+        }
+    }
+
+    private func exportTree(_ builder: RootFilesystemBuilder, _ guestPath: String, to destination: URL, stats: inout ExportStats) throws {
+        let fileManager = FileManager.default
+        if builder.isSymbolicLink(at: guestPath) { stats.skipped += 1; return }
+        if builder.isFolder(at: guestPath) {
+            try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+            stats.folders += 1
+            let children = try builder.children(of: guestPath).sorted { $0.name < $1.name }
+            for child in children {
+                let childPath = (guestPath == "/" ? "" : guestPath) + "/" + child.name
+                try exportTree(builder, childPath, to: destination.appendingPathComponent(child.name), stats: &stats)
+            }
+            return
+        }
+        do {
+            let bytes = try builder.contents(of: guestPath)
+            try Data(bytes).write(to: destination)
+            stats.files += 1
+            stats.bytes += UInt64(bytes.count)
+        } catch {
+            stats.skipped += 1
+            if stats.firstProblem == nil { stats.firstProblem = "\(guestPath): \(error)" }
+        }
     }
 
     func logTail() -> String {
@@ -495,6 +601,25 @@ public func podium_add_files(_ dataDir: UnsafePointer<CChar>?, _ filePaths: Unsa
 public func podium_probe_storage(_ directory: UnsafePointer<CChar>?) -> Int32 {
     guard let directory else { return 22 }
     return podium_probe_shared_mmap(directory)
+}
+
+/// Copies a folder from the iPod's disk into `destDir` as ordinary files. Returns the file count (>= 0) or -1 with the reason in `out`.
+@_cdecl("podium_export_files")
+public func podium_export_files(_ ipsw: UnsafePointer<CChar>?, _ dataDir: UnsafePointer<CChar>?, _ guestPath: UnsafePointer<CChar>?,
+                                _ destDir: UnsafePointer<CChar>?, _ out: UnsafeMutablePointer<CChar>?, _ capacity: Int32) -> Int32 {
+    guard let ipswURL = url(ipsw), let dataURL = url(dataDir), let destURL = url(destDir), let guestPath else {
+        _ = writeCString("Missing arguments.", to: out, capacity: capacity)
+        return -1
+    }
+    let result = AndroidHost.shared.exportFiles(ipsw: ipswURL, dataDir: dataURL, guestPath: String(cString: guestPath), destination: destURL)
+    _ = writeCString(result.message, to: out, capacity: capacity)
+    return result.code
+}
+
+/// Live CPU and emulator details as "key: value" lines.
+@_cdecl("podium_dev_info")
+public func podium_dev_info(_ out: UnsafeMutablePointer<CChar>?, _ capacity: Int32) -> Int32 {
+    writeCString(AndroidHost.shared.devInfo(), to: out, capacity: capacity)
 }
 
 /// Whether this device lets the DBT have executable memory: 0 no, 1 RWX mapping, 2 dual mapping.

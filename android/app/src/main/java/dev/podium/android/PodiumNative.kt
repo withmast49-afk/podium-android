@@ -44,6 +44,12 @@ object PodiumNative {
     /** 0 if [directory] can hold the live iPod disk (shared writable mmap works there), else an errno. */
     @JvmStatic external fun probeStorage(directory: String): Int
 
+    /** "count|summary" (count >= 0) or "-1|reason": copies a folder of the iPod's disk to [destDir] as ordinary files. */
+    @JvmStatic external fun exportFiles(ipsw: String, dataDir: String, guestPath: String, destDir: String): String
+
+    /** Live CPU and emulator details as "key: value" lines. */
+    @JvmStatic external fun devInfo(): String
+
     /** What the DBT could get from this device: 0 no JIT, 1 RWX memory, 2 dual-mapped memory. */
     @JvmStatic external fun probeJit(): Int
     @JvmStatic external fun frameWidth(): Int

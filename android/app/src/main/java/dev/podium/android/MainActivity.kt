@@ -59,6 +59,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var installDebButton: MaterialButton
     private lateinit var importFilesButton: MaterialButton
     private lateinit var logPreview: TextView
+    private lateinit var screenView: ScreenView
+    private lateinit var devSwitch: MaterialSwitch
+    private lateinit var devInfo: TextView
+    private lateinit var exportFilesButton: MaterialButton
 
     /** Where the iPod currently lives; starts private and is upgraded by [reloadStorage]. */
     @Volatile private lateinit var layout: DeviceStorage.Layout
@@ -130,7 +134,18 @@ class MainActivity : AppCompatActivity() {
         installDebButton = findViewById(R.id.installDebButton)
         importFilesButton = findViewById(R.id.importFilesButton)
         logPreview = findViewById(R.id.logPreview)
+        screenView = findViewById(R.id.screenView)
+        devSwitch = findViewById(R.id.devSwitch)
+        devInfo = findViewById(R.id.devInfo)
+        exportFilesButton = findViewById(R.id.exportFilesButton)
         progress.max = 1000
+        devSwitch.isChecked = settings.developerOptions
+        devInfo.visibility = if (settings.developerOptions) View.VISIBLE else View.GONE
+        devSwitch.setOnCheckedChangeListener { _, checked ->
+            settings.developerOptions = checked
+            devInfo.visibility = if (checked) View.VISIBLE else View.GONE
+        }
+        exportFilesButton.setOnClickListener { chooseExport() }
 
         importButton.setOnClickListener { pickIpsw.launch(arrayOf("*/*")) }
         powerOnButton.setOnClickListener { powerOn() }
@@ -327,16 +342,18 @@ class MainActivity : AppCompatActivity() {
         Thread {
             while (alive) {
                 val status = PodiumStatus.parse(PodiumNative.status())
-                val logLines = if (onSettingsPage) PodiumNative.log().lines().filter { it.isNotBlank() }.takeLast(6) else null
-                ui.post { render(status, logLines) }
+                val logLines = if (onSettingsPage) PodiumNative.log().lines().filter { it.isNotBlank() }.takeLast(14) else null
+                val dev = if (onSettingsPage && settings.developerOptions) PodiumNative.devInfo() else null
+                ui.post { render(status, logLines, dev) }
                 try { Thread.sleep(500) } catch (_: InterruptedException) { return@Thread }
             }
         }.also { it.isDaemon = true }.start()
     }
 
-    private fun render(status: PodiumStatus, logLines: List<String>?) {
+    private fun render(status: PodiumStatus, logLines: List<String>?, dev: String?) {
         lastStage = status.stage
         lastStatus = status
+        updateOverlay(status)
         if (!importing && !busyWithFiles && toolsReady) {
             statusText.text = when (status.stage) {
                 PodiumNative.STAGE_IDLE -> if (ipswBootable) "Ready" else "Pick an IPSW to begin"
@@ -360,7 +377,21 @@ class MainActivity : AppCompatActivity() {
         }
         renderJit(status)
         if (logLines != null) logPreview.text = if (logLines.isEmpty()) "No log yet." else logLines.joinToString("\n")
+        if (dev != null) devInfo.text = dev
         refresh()
+    }
+
+    /** What the screen shows before iOS draws anything: the Apple logo, with progress while starting. */
+    private fun updateOverlay(status: PodiumStatus) {
+        val (title, lit) = when (status.stage) {
+            PodiumNative.STAGE_PREPARING -> "Preparing iOS…" to true
+            PodiumNative.STAGE_LOADING_KERNEL -> "Loading the kernel…" to true
+            PodiumNative.STAGE_BOOTING, PodiumNative.STAGE_RUNNING -> "Starting iOS…" to true
+            PodiumNative.STAGE_ERROR -> "Stopped" to false
+            else -> "Powered off" to false
+        }
+        val showProgress = status.stage == PodiumNative.STAGE_PREPARING || status.stage == PodiumNative.STAGE_BOOTING
+        screenView.setOverlay(title, if (showProgress) status.fraction.toFloat() else -1f, lit)
     }
 
     /** Shows whether the DBT has executable memory. Read-only: the app turns the JIT on by itself when it can. */
@@ -386,6 +417,7 @@ class MainActivity : AppCompatActivity() {
         installIpaButton.isEnabled = free && ipswBootable
         installDebButton.isEnabled = free && ipswBootable
         importFilesButton.isEnabled = free && ipswBootable
+        exportFilesButton.isEnabled = free && ipswBootable && layout.shared
     }
 
     // MARK: Player actions
@@ -559,6 +591,67 @@ class MainActivity : AppCompatActivity() {
         contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) cursor.getString(0) else null
         }
+
+    // MARK: Export iOS files as ordinary files
+
+    private fun chooseExport() {
+        if (!layout.shared) {
+            snack("Exporting needs the iPod in Documents/ios. Allow file access in Storage first.")
+            return
+        }
+        val choices = listOf(
+            "Applications (/Applications)" to "/Applications",
+            "User data (/private/var/mobile)" to "/private/var/mobile",
+            "Media (/private/var/mobile/Media)" to "/private/var/mobile/Media",
+            "Whole disk (/), can take a long while" to "/",
+        )
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Export which folder?")
+            .setItems(choices.map { it.first }.toTypedArray()) { _, which -> exportFolder(choices[which].second) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun exportFolder(guestPath: String) {
+        val current = layout
+        busyWithFiles = true
+        statusText.text = "Exporting iOS files… (keep the app open)"
+        refresh()
+        val label = if (guestPath == "/") "disk" else guestPath.trim('/').replace('/', '-')
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val destination = File(File(current.firmwareDir.parentFile, "export"), "$label-$stamp")
+        Thread {
+            var title = "Couldn't export"
+            var message = ""
+            try {
+                destination.parentFile?.mkdirs()
+                val parts = PodiumNative.exportFiles(
+                    current.ipsw.absolutePath, current.deviceDir.absolutePath, guestPath, destination.absolutePath,
+                ).split("|", limit = 2)
+                val count = parts.getOrNull(0)?.toIntOrNull() ?: -1
+                val text = parts.getOrNull(1).orEmpty()
+                if (count >= 0) {
+                    title = "Exported"
+                    message = "$text\n\nSaved in ${destination.absolutePath}"
+                } else {
+                    message = text
+                }
+            } catch (error: Exception) {
+                message = error.message ?: error.toString()
+            } finally {
+                busyWithFiles = false
+            }
+            ui.post {
+                refresh()
+                MaterialAlertDialogBuilder(this)
+                    .setTitle(title)
+                    .setMessage(message)
+                    .setPositiveButton("OK", null)
+                    .setNeutralButton("Open folder") { _, _ -> openFolder() }
+                    .show()
+            }
+        }.start()
+    }
 
     // MARK: Logs
 

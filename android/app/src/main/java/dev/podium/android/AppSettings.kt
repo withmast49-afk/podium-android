@@ -16,7 +16,13 @@ class AppSettings(context: Context) {
         get() = prefs.getBoolean(KEY_DYNAMIC, true)
         set(value) = prefs.edit().putBoolean(KEY_DYNAMIC, value).apply()
 
+    /** Whether the Developer card in Settings shows live CPU/emulator details. */
+    var developerOptions: Boolean
+        get() = prefs.getBoolean(KEY_DEV, false)
+        set(value) = prefs.edit().putBoolean(KEY_DEV, value).apply()
+
     private companion object {
+        const val KEY_DEV = "developer_options"
         const val KEY_THEME = "theme_mode"
         const val KEY_DYNAMIC = "dynamic_color"
     }
